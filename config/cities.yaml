@@ -1,0 +1,10 @@
+cities:
+  - city_id: nairobi
+    city: Nairobi
+    country: Kenya
+    country_code: KE
+    latitude: -1.29
+    longitude: 36.82
+    timezone: Africa/Nairobi
+    enabled: true
+

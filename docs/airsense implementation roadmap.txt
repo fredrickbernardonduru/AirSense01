@@ -1,0 +1,29 @@
+AirSense implementation roadmap
+1. First
+    Phase 0 — Project foundation
+   
+   Rename the project, inspect existing files, clean up the structure, establish environment configuration and document the new architecture.
+2. Phase 1 — Data ingestion
+   
+   Implement air-quality and weather ingestion for Nairobi. Publish validated events into Kafka.
+3. Phase 2 — Real-time streaming
+   
+   Resolve the existing Flink/Kafka connector problem. Process incoming measurements, calculate rolling averages and detect anomalies.
+4. Phase 3 — Lakehouse
+   
+   Set up MinIO, Iceberg and Nessie. Implement Bronze, Silver and Gold tables.
+5. Phase 4 — Batch engineering
+   
+   Use Airflow and Spark for historical processing, backfills and scheduled transformations.
+6. Phase 5 — Analytics
+   
+   Introduce Trino, dbt and ClickHouse. Build city-level and station-level analytics.
+7. Phase 6 — Dashboards and alerts
+   
+   Build live pollution dashboards, historical comparisons and anomaly notifications.
+8. Phase 7 — Machine learning
+   
+   Train and evaluate a 24-hour PM2.5 forecasting model. Track experiments with MLflow.
+9. Phase 8 — Production readiness
+   
+   Implement testing, monitoring, data quality, CI/CD and deployment to AWS.
