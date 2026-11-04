@@ -62,8 +62,13 @@ def main() -> None:
 
     print_section("FRESHNESS")
 
-    freshness_counts = pc.value_counts(table["is_stale"]).as_py()
+    # freshness_counts = pc.value_counts(table["is_stale"]).as_py()
 
+    # for item in freshness_counts:
+    #     print(f"is_stale={item['values']}: {item['counts']}")
+
+    freshness_counts = pc.value_counts(
+    table["is_stale"]).to_pylist()
     for item in freshness_counts:
         print(f"is_stale={item['values']}: {item['counts']}")
 
