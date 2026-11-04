@@ -51,8 +51,12 @@ def main() -> None:
 
     print_section("MEASUREMENTS BY CATEGORY")
 
-    category_counts = pc.value_counts(table["category"]).as_py()
+    # category_counts = pc.value_counts(table["category"]).as_py()
 
+    # for item in category_counts:
+    #     print(f"{item['values']}: {item['counts']}")
+    category_counts = pc.value_counts(
+    table["category"] ).to_pylist()
     for item in category_counts:
         print(f"{item['values']}: {item['counts']}")
 
