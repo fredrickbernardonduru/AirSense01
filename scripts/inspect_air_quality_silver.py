@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-RUN_ID = "20261104T143551_2cdda1f4"
+RUN_ID = "20261109T085904_11c1ac5b"
 
 SILVER_DIR = (
     PROJECT_ROOT
@@ -51,24 +51,15 @@ def main() -> None:
 
     print_section("MEASUREMENTS BY CATEGORY")
 
-    # category_counts = pc.value_counts(table["category"]).as_py()
+    category_counts = pc.value_counts(table["category"]).to_pylist()
 
-    # for item in category_counts:
-    #     print(f"{item['values']}: {item['counts']}")
-    category_counts = pc.value_counts(
-    table["category"] ).to_pylist()
     for item in category_counts:
         print(f"{item['values']}: {item['counts']}")
 
     print_section("FRESHNESS")
 
-    # freshness_counts = pc.value_counts(table["is_stale"]).as_py()
+    freshness_counts = pc.value_counts(table["is_stale"]).to_pylist()
 
-    # for item in freshness_counts:
-    #     print(f"is_stale={item['values']}: {item['counts']}")
-
-    freshness_counts = pc.value_counts(
-    table["is_stale"]).to_pylist()
     for item in freshness_counts:
         print(f"is_stale={item['values']}: {item['counts']}")
 

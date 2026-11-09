@@ -12,9 +12,11 @@ from uuid import uuid4
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ingestion.common.config import load_cities
+
 
 # ---------------------------------------------------------------------------
-# Project paths and processing configuration
+# Paths and configuration
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -22,9 +24,47 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BRONZE_DIR = PROJECT_ROOT / "data" / "bronze"
 SILVER_DIR = PROJECT_ROOT / "data" / "silver" / "air_quality"
 
-# An observation older than this is marked stale.
-# Stale observations are still valid historical data.
 STALE_AFTER_HOURS = 6
+
+
+# ---------------------------------------------------------------------------
+# Explicit Parquet schemas
+# ---------------------------------------------------------------------------
+
+OBSERVATION_SCHEMA = pa.schema([
+    pa.field("event_id", pa.string()),
+    pa.field("event_type", pa.string()),
+    pa.field("source", pa.string()),
+    pa.field("city_id", pa.string()),
+    pa.field("parameter", pa.string()),
+    pa.field("parameter_original", pa.string()),
+    pa.field("category", pa.string()),
+    pa.field("value", pa.float64()),
+    pa.field("unit", pa.string()),
+    pa.field("source_unit", pa.string()),
+    pa.field("observed_at", pa.timestamp("us", tz="UTC")),
+    pa.field("bronze_ingested_at", pa.timestamp("us", tz="UTC")),
+    pa.field("processed_at", pa.timestamp("us", tz="UTC")),
+    pa.field("observation_age_seconds", pa.int64()),
+    pa.field("is_stale", pa.bool_()),
+    pa.field("location_id", pa.string()),
+    pa.field("location_name", pa.string()),
+    pa.field("sensor_id", pa.string()),
+    pa.field("latitude", pa.float64()),
+    pa.field("longitude", pa.float64()),
+    pa.field("country_code", pa.string()),
+])
+
+REJECTED_SCHEMA = pa.schema([
+    pa.field("source", pa.string()),
+    pa.field("city_id", pa.string()),
+    pa.field("location_id", pa.string()),
+    pa.field("sensor_id", pa.string()),
+    pa.field("rejection_reason", pa.string()),
+    pa.field("raw_record", pa.string()),
+    pa.field("bronze_ingested_at", pa.string()),
+    pa.field("processed_at", pa.timestamp("us", tz="UTC")),
+])
 
 
 # ---------------------------------------------------------------------------
@@ -49,26 +89,17 @@ PARAMETER_ALIASES = {
 }
 
 POLLUTANT_PARAMETERS = {
-    "pm2_5",
-    "pm10",
-    "pm1",
-    "no2",
-    "o3",
-    "co",
-    "so2",
+    "pm2_5", "pm10", "pm1", "no2", "o3", "co", "so2"
 }
 
 ENVIRONMENTAL_PARAMETERS = {
-    "relative_humidity",
-    "temperature",
-    "pressure",
+    "relative_humidity", "temperature", "pressure"
 }
 
 PARTICLE_PARAMETERS = {"um003"}
 
 
 def canonical_parameter(name: str | None) -> str | None:
-    """Map source parameter names to AirSense canonical names."""
     if not name:
         return None
 
@@ -77,15 +108,16 @@ def canonical_parameter(name: str | None) -> str | None:
 
 
 def normalize_unit(unit: str | None) -> str:
-    """Normalise common unit spelling differences."""
     if not unit:
         return ""
 
-    cleaned = unit.strip().lower()
-    cleaned = cleaned.replace("μ", "µ")
-    cleaned = cleaned.replace("³", "3")
-    cleaned = cleaned.replace(" ", "")
-    return cleaned
+    return (
+        unit.strip()
+        .lower()
+        .replace("μ", "µ")
+        .replace("³", "3")
+        .replace(" ", "")
+    )
 
 
 def standardize_value(
@@ -93,20 +125,16 @@ def standardize_value(
     value: float,
     source_unit: str | None,
 ) -> tuple[float, str]:
-    """
-    Convert supported measurements into canonical units.
 
-    Raises ValueError when the parameter's unit is unsupported.
-    """
     unit = normalize_unit(source_unit)
 
-    # Particulate matter: micrograms per cubic metre.
     if parameter in {"pm2_5", "pm10", "pm1"}:
         if unit not in {"µg/m3", "ug/m3"}:
-            raise ValueError(f"Unsupported particulate matter unit: {source_unit}")
+            raise ValueError(
+                f"Unsupported particulate matter unit: {source_unit}"
+            )
         return value, "µg/m³"
 
-    # Temperature: Celsius.
     if parameter == "temperature":
         if unit in {"c", "°c", "degc", "celsius"}:
             return value, "°C"
@@ -114,15 +142,17 @@ def standardize_value(
         if unit in {"f", "°f", "degf", "fahrenheit"}:
             return (value - 32) * 5 / 9, "°C"
 
-        raise ValueError(f"Unsupported temperature unit: {source_unit}")
+        raise ValueError(
+            f"Unsupported temperature unit: {source_unit}"
+        )
 
-    # Relative humidity: percentage.
     if parameter == "relative_humidity":
         if unit not in {"%", "percent", "percentage"}:
-            raise ValueError(f"Unsupported humidity unit: {source_unit}")
+            raise ValueError(
+                f"Unsupported humidity unit: {source_unit}"
+            )
         return value, "%"
 
-    # Atmospheric pressure: hectopascals.
     if parameter == "pressure":
         if unit in {"hpa", "mbar"}:
             return value, "hPa"
@@ -133,9 +163,10 @@ def standardize_value(
         if unit == "kpa":
             return value * 10, "hPa"
 
-        raise ValueError(f"Unsupported pressure unit: {source_unit}")
+        raise ValueError(
+            f"Unsupported pressure unit: {source_unit}"
+        )
 
-    # Gas concentrations: preserve a recognised concentration unit.
     gas_units = {
         "ppb": "ppb",
         "ppm": "ppm",
@@ -146,16 +177,21 @@ def standardize_value(
 
     if parameter in {"no2", "o3", "co", "so2"}:
         if unit not in gas_units:
-            raise ValueError(f"Unsupported gas concentration unit: {source_unit}")
+            raise ValueError(
+                f"Unsupported gas concentration unit: {source_unit}"
+            )
         return value, gas_units[unit]
 
-    # Particle count: preserve the source unit.
     if parameter in PARTICLE_PARAMETERS:
         if not source_unit or not source_unit.strip():
-            raise ValueError("Particle count measurement has no source unit")
+            raise ValueError(
+                "Particle count measurement has no source unit"
+            )
         return value, source_unit.strip()
 
-    raise ValueError(f"No unit standardisation rule for: {parameter}")
+    raise ValueError(
+        f"No unit standardisation rule for: {parameter}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +199,6 @@ def standardize_value(
 # ---------------------------------------------------------------------------
 
 def parse_utc_timestamp(value: Any) -> datetime:
-    """
-    Parse a timestamp that explicitly identifies its timezone.
-
-    Naive timestamps are rejected rather than silently interpreted as UTC.
-    """
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Missing observation timestamp")
 
@@ -179,25 +210,27 @@ def parse_utc_timestamp(value: Any) -> datetime:
         raise ValueError(f"Invalid timestamp: {value}") from exc
 
     if parsed.tzinfo is None:
-        raise ValueError(f"Timestamp has no timezone information: {value}")
+        raise ValueError(
+            f"Timestamp has no timezone information: {value}"
+        )
 
     return parsed.astimezone(timezone.utc)
 
 
 def parse_ingested_at(value: Any) -> datetime:
-    """Read the original Bronze ingestion timestamp."""
     if not value:
-        raise ValueError("Bronze record has no ingested_at timestamp")
+        raise ValueError(
+            "Bronze record has no ingested_at timestamp"
+        )
 
     return parse_utc_timestamp(value)
 
 
 # ---------------------------------------------------------------------------
-# Bronze discovery and metadata lookup
+# Bronze discovery
 # ---------------------------------------------------------------------------
 
 def read_jsonl(path: Path) -> list[dict]:
-    """Read JSON objects from a JSON Lines file."""
     records = []
 
     with path.open("r", encoding="utf-8") as file:
@@ -216,7 +249,6 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def discover_bronze_files(source: str) -> list[Path]:
-    """Find every Bronze JSONL batch for a source."""
     source_dir = BRONZE_DIR / source
 
     if not source_dir.exists():
@@ -226,17 +258,9 @@ def discover_bronze_files(source: str) -> list[Path]:
 
 
 def build_sensor_lookup() -> dict[tuple[str, str], dict]:
-    """
-    Build a lookup from stored OpenAQ location batches.
-
-    Key: (location_id, sensor_id)
-    Value: sensor metadata
-    """
     sensor_lookup = {}
 
-    location_files = discover_bronze_files("openaq_locations")
-
-    for path in location_files:
+    for path in discover_bronze_files("openaq_locations"):
         for record in read_jsonl(path):
             payload = record.get("payload")
 
@@ -260,14 +284,26 @@ def build_sensor_lookup() -> dict[tuple[str, str], dict]:
                     ] = {
                         **sensor,
                         "_location_name": location.get("name"),
-                        "_location_coordinates": location.get("coordinates"),
+                        "_location_coordinates": (
+                            location.get("coordinates")
+                        ),
                     }
 
     return sensor_lookup
 
 
+def build_city_lookup() -> dict[str, dict]:
+    """Load city metadata from the project's cities configuration."""
+    cities = load_cities()
+
+    return {
+        city["city_id"]: city
+        for city in cities
+    }
+
+
 # ---------------------------------------------------------------------------
-# Measurement transformation
+# Rejected records
 # ---------------------------------------------------------------------------
 
 def reject_record(
@@ -276,32 +312,41 @@ def reject_record(
     metadata: dict,
     processed_at: datetime,
 ) -> dict:
-    """Build a standard rejected-record structure."""
+
     return {
         "source": "openaq",
         "city_id": metadata.get("city_id"),
-        "location_id": metadata.get("location_id"),
-        "sensor_id": raw.get("sensorsId") or raw.get("sensors_id"),
+        "location_id": str(
+            metadata.get("location_id")
+        ) if metadata.get("location_id") is not None else None,
+        "sensor_id": str(
+            raw.get("sensorsId") or raw.get("sensors_id")
+        ) if (
+            raw.get("sensorsId") or raw.get("sensors_id")
+        ) is not None else None,
         "rejection_reason": reason,
-        "raw_record": json.dumps(raw, ensure_ascii=False, default=str),
+        "raw_record": json.dumps(
+            raw,
+            ensure_ascii=False,
+            default=str,
+        ),
         "bronze_ingested_at": metadata.get("ingested_at"),
         "processed_at": processed_at,
     }
 
 
+# ---------------------------------------------------------------------------
+# Measurement transformation
+# ---------------------------------------------------------------------------
+
 def transform_measurement(
     raw: dict,
     bronze_metadata: dict,
     sensor_lookup: dict[tuple[str, str], dict],
+    city_lookup: dict[str, dict],
     processed_at: datetime,
 ) -> tuple[dict | None, dict | None]:
-    """
-    Transform one raw OpenAQ measurement.
 
-    Returns:
-        (valid_record, None) when accepted
-        (None, rejected_record) when rejected
-    """
     location_id = (
         raw.get("locationsId")
         or raw.get("locations_id")
@@ -318,7 +363,9 @@ def transform_measurement(
             processed_at,
         )
 
-    sensor = sensor_lookup.get((str(location_id), str(sensor_id)))
+    sensor = sensor_lookup.get(
+        (str(location_id), str(sensor_id))
+    )
 
     if sensor is None:
         return None, reject_record(
@@ -350,10 +397,8 @@ def transform_measurement(
             processed_at,
         )
 
-    raw_value = raw.get("value")
-
     try:
-        value = float(raw_value)
+        value = float(raw.get("value"))
     except (TypeError, ValueError):
         return None, reject_record(
             "Measurement value is missing or not numeric",
@@ -372,19 +417,17 @@ def transform_measurement(
 
     raw_datetime = raw.get("datetime") or {}
 
-    if isinstance(raw_datetime, dict):
-        timestamp_value = raw_datetime.get("utc")
-    else:
-        timestamp_value = raw_datetime
+    timestamp_value = (
+        raw_datetime.get("utc")
+        if isinstance(raw_datetime, dict)
+        else raw_datetime
+    )
 
     try:
         observed_at = parse_utc_timestamp(timestamp_value)
     except ValueError as exc:
         return None, reject_record(
-            str(exc),
-            raw,
-            bronze_metadata,
-            processed_at,
+            str(exc), raw, bronze_metadata, processed_at
         )
 
     try:
@@ -395,10 +438,7 @@ def transform_measurement(
         )
     except ValueError as exc:
         return None, reject_record(
-            str(exc),
-            raw,
-            bronze_metadata,
-            processed_at,
+            str(exc), raw, bronze_metadata, processed_at
         )
 
     try:
@@ -407,11 +447,11 @@ def transform_measurement(
         )
     except ValueError as exc:
         return None, reject_record(
-            str(exc),
-            raw,
-            bronze_metadata,
-            processed_at,
+            str(exc), raw, bronze_metadata, processed_at
         )
+
+    city_id = bronze_metadata.get("city_id")
+    city = city_lookup.get(city_id, {})
 
     age = processed_at - observed_at
     is_stale = age > timedelta(hours=STALE_AFTER_HOURS)
@@ -422,21 +462,22 @@ def transform_measurement(
         or {}
     )
 
-    category = (
-        "pollutant"
-        if parameter in POLLUTANT_PARAMETERS
-        else "environmental"
-        if parameter in ENVIRONMENTAL_PARAMETERS
-        else "particle_count"
-    )
+    if parameter in POLLUTANT_PARAMETERS:
+        category = "pollutant"
+    elif parameter in ENVIRONMENTAL_PARAMETERS:
+        category = "environmental"
+    else:
+        category = "particle_count"
 
     observed_at_string = observed_at.isoformat()
 
     return {
-        "event_id": f"openaq:{sensor_id}:{observed_at_string}",
+        "event_id": (
+            f"openaq:{sensor_id}:{observed_at_string}"
+        ),
         "event_type": "air_quality_observation",
         "source": "openaq",
-        "city_id": bronze_metadata.get("city_id"),
+        "city_id": city_id,
         "parameter": parameter,
         "parameter_original": original_parameter,
         "category": category,
@@ -456,20 +497,16 @@ def transform_measurement(
         "sensor_id": str(sensor_id),
         "latitude": coordinates.get("latitude"),
         "longitude": coordinates.get("longitude"),
-        "country_code": bronze_metadata.get("country_code"),
+        "country_code": city.get("country_code"),
     }, None
 
 
 # ---------------------------------------------------------------------------
-# Deduplication and Parquet output
+# Deduplication
 # ---------------------------------------------------------------------------
 
 def deduplicate(records: list[dict]) -> list[dict]:
-    """
-    Keep the most recently ingested copy of each sensor observation.
-
-    The stable observation key is sensor_id + observed_at.
-    """
+    """Keep the most recently ingested copy of each observation."""
     unique_records = {}
 
     for record in records:
@@ -490,14 +527,26 @@ def deduplicate(records: list[dict]) -> list[dict]:
     return list(unique_records.values())
 
 
-def write_parquet(records: list[dict], output_path: Path) -> None:
-    """Write records as a Parquet file."""
-    if not records:
-        return
+# ---------------------------------------------------------------------------
+# Parquet output
+# ---------------------------------------------------------------------------
 
+def write_parquet(
+    records: list[dict],
+    output_path: Path,
+    schema: pa.Schema,
+) -> None:
+    """
+    Always write a Parquet file, including when records is empty.
+    The explicit schema keeps the dataset structure predictable.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    table = pa.Table.from_pylist(records)
+    table = pa.Table.from_pylist(
+        records,
+        schema=schema,
+    )
+
     pq.write_table(
         table,
         output_path,
@@ -510,15 +559,17 @@ def write_parquet(records: list[dict], output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def process_air_quality_bronze() -> dict:
-    """Transform all available OpenAQ Bronze batches into Silver Parquet."""
     processed_at = datetime.now(timezone.utc)
 
     print("\n========== AIRSENSE OPENAQ SILVER PROCESSING ==========")
 
     if not BRONZE_DIR.exists():
-        raise FileNotFoundError(f"Bronze directory not found: {BRONZE_DIR}")
+        raise FileNotFoundError(
+            f"Bronze directory not found: {BRONZE_DIR}"
+        )
 
     sensor_lookup = build_sensor_lookup()
+    city_lookup = build_city_lookup()
 
     if not sensor_lookup:
         raise RuntimeError(
@@ -561,6 +612,7 @@ def process_air_quality_bronze() -> dict:
                     raw=raw,
                     bronze_metadata=metadata,
                     sensor_lookup=sensor_lookup,
+                    city_lookup=city_lookup,
                     processed_at=processed_at,
                 )
 
@@ -572,18 +624,38 @@ def process_air_quality_bronze() -> dict:
 
     before_deduplication = len(valid_records)
     valid_records = deduplicate(valid_records)
-    duplicates_removed = before_deduplication - len(valid_records)
 
-    run_id = processed_at.strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8]
+    duplicates_removed = (
+        before_deduplication - len(valid_records)
+    )
+
+    run_id = (
+        processed_at.strftime("%Y%m%dT%H%M%S")
+        + "_"
+        + uuid4().hex[:8]
+    )
+
     output_dir = SILVER_DIR / f"run_id={run_id}"
 
     observations_path = output_dir / "observations.parquet"
     rejected_path = output_dir / "rejected.parquet"
 
-    write_parquet(valid_records, observations_path)
-    write_parquet(rejected_records, rejected_path)
+    write_parquet(
+        valid_records,
+        observations_path,
+        OBSERVATION_SCHEMA,
+    )
 
-    stale_count = sum(record["is_stale"] for record in valid_records)
+    write_parquet(
+        rejected_records,
+        rejected_path,
+        REJECTED_SCHEMA,
+    )
+
+    stale_count = sum(
+        record["is_stale"]
+        for record in valid_records
+    )
 
     summary = {
         "run_id": run_id,
@@ -594,6 +666,12 @@ def process_air_quality_bronze() -> dict:
         "valid_measurements": len(valid_records),
         "rejected_measurements": len(rejected_records),
         "duplicates_removed": duplicates_removed,
+        "unique_sensors": len({
+            record["sensor_id"] for record in valid_records
+        }),
+        "unique_locations": len({
+            record["location_id"] for record in valid_records
+        }),
         "stale_observations": stale_count,
         "fresh_observations": len(valid_records) - stale_count,
         "observations_path": str(observations_path),
@@ -601,6 +679,7 @@ def process_air_quality_bronze() -> dict:
     }
 
     print("\nProcessing summary:")
+
     for key, value in summary.items():
         print(f"  {key}: {value}")
 
